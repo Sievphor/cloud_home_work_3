@@ -174,7 +174,7 @@ def create_report():
         "នៅពេលរកឃើញបញ្ហាក្នុងកំណែ v1.2.0 យើងបានធ្វើការ Rollback ត្រឡប់ទៅកំណែចាស់ v1.0.0៖\n"
         "១. ចូលទៅកាន់ Jenkins Job ហើយជ្រើសរើស ACTION = rollback និង VERSION = v1.0.0\n"
         "២. Pipeline បានផ្ទៀងផ្ទាត់វត្តមានរបស់ Image v1.0.0 នៅក្នុង Amazon ECR ជាមុនតាមរយៈ aws ecr describe-images\n"
-        "៣. Jenkins បានបញ្ជាទៅ Swarm Manager (13.220.98.249) ឱ្យធ្វើ Rolling Update ទៅកាន់ Image v1.0.0 ដោយផ្ទាល់\n"
+        "៣. Jenkins បានបញ្ជាទៅ Swarm Manager (3.91.30.20) ឱ្យធ្វើ Rolling Update ទៅកាន់ Image v1.0.0 ដោយផ្ទាល់\n"
         "៤. ដំណើរការនេះពុំមានការ Checkout កូដ ឬ Build រូបភាពថ្មីឡើយ (No Rebuild) ដែលជួយកាត់បន្ថយពេលវេលា និងគ្មានហានិភ័យនៃកំហុសកូដ។"
     )
     add_figure_box("រូបភាពទី ៦៖ ការអនុវត្ត Rollback ក្នុង Jenkins (No Rebuild Console Log)")
@@ -215,9 +215,9 @@ def create_report():
         "កិច្ចការ Homework 3 នេះបានបង្ហាញពីប្រសិទ្ធភាពខ្ពស់នៃ Release Management ក្នុងប្រព័ន្ធ Cloud DevOps។ "
         "ការរួមបញ្ចូលគ្នារវាង Semantic Versioning, Immutable Image Tags ក្នុង Amazon ECR, Parameterized Jenkins Pipeline, "
         "និង Zero-Downtime Rollback លើ Docker Swarm ផ្តល់នូវស្តង់ដារវិស្វកម្មកម្រិត Production ដ៏រឹងមាំសម្រាប់គ្រប់គ្រងកម្មវិធី។\n"
-        "• Manager Endpoint: http://13.220.98.249:80\n"
-        "• Worker 1 Endpoint: http://34.229.219.41:80\n"
-        "• Worker 2 Endpoint: http://54.90.208.206:80"
+        "• Manager Endpoint: http://3.91.30.20:80\n"
+        "• Worker 1 Endpoint: http://34.229.205.236:80\n"
+        "• Worker 2 Endpoint: http://54.160.200.116:80"
     )
 
     output_path = os.path.join(os.path.dirname(__file__), "TONN-Sievphor-Documentation_homework3.docx")
