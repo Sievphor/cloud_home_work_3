@@ -49,8 +49,8 @@ pipeline {
         SERVICE_NAME    = 'homework3_web'
 
         // Jenkins Credentials IDs
+        SSH_CREDENTIALS = 'ec2-server-key'
         AWS_CREDENTIALS = 'aws-credentials'
-        SSH_CREDENTIALS = 'swarm-ssh-key'
 
         PATH = '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
     }
@@ -112,12 +112,10 @@ pipeline {
                 echo "Building Docker image: ${env.FULL_IMAGE_NAME}"
                 echo "======================================"
                 sh '''
-                    set -eu
-                    docker buildx build \
-                        --platform linux/amd64 \
-                        --pull \
-                        --tag "${FULL_IMAGE_NAME}" \
-                        --load \
+                    set -e
+                    docker build \
+                        -t "${FULL_IMAGE_NAME}" \
+                        -t "${ECR_REPO}:${IMAGE_TAG}" \
                         .
 
                     docker image inspect "${FULL_IMAGE_NAME}" \
@@ -136,33 +134,26 @@ pipeline {
                 echo "======================================"
                 echo "Pushing immutable image to Amazon ECR"
                 echo "======================================"
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS}"
-                    ]
-                ]) {
-                    sh '''
-                        set -eu
+                sh '''
+                    set -e
 
-                        # Authenticate Docker client with ECR
-                        aws ecr get-login-password --region "${AWS_REGION}" | \
-                        docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+                    # Authenticate Docker client with ECR
+                    aws ecr get-login-password --region "${AWS_REGION}" | \
+                    docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
-                        # Push the versioned tag to ECR
-                        docker push "${FULL_IMAGE_NAME}"
+                    # Push the versioned tag to ECR
+                    docker push "${FULL_IMAGE_NAME}"
 
-                        # Verify image existence in ECR
-                        aws ecr describe-images \
-                            --region "${AWS_REGION}" \
-                            --repository-name "${ECR_REPO}" \
-                            --image-ids imageTag="${IMAGE_TAG}" \
-                            --query 'imageDetails[0].[imageTags,imageDigest,imagePushedAt]' \
-                            --output table
+                    # Verify image existence in ECR
+                    aws ecr describe-images \
+                        --region "${AWS_REGION}" \
+                        --repository-name "${ECR_REPO}" \
+                        --image-ids imageTag="${IMAGE_TAG}" \
+                        --query 'imageDetails[0].[imageTags,imageDigest,imagePushedAt]' \
+                        --output table
 
-                        echo "Successfully pushed immutable image: ${FULL_IMAGE_NAME}"
-                    '''
-                }
+                    echo "Successfully pushed immutable image: ${FULL_IMAGE_NAME}"
+                '''
             }
         }
 
@@ -177,54 +168,52 @@ pipeline {
                 echo "Deploying ${FULL_IMAGE_NAME} to Docker Swarm"
                 echo "======================================"
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS}"
-                    ]
+                    sshUserPrivateKey(
+                        credentialsId: "${SSH_CREDENTIALS}",
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
                 ]) {
-                    sshagent(["${SSH_CREDENTIALS}"]) {
-                        sh '''
-                            set -eu
+                    sh '''
+                        set -e
+                        KEY_OPT="-i $SSH_KEY"
+                        if [ -f "/var/jenkins_home/.ssh/id_rsa" ]; then
+                            KEY_OPT="-i /var/jenkins_home/.ssh/id_rsa"
+                        fi
 
-                            TOKEN_FILE="$WORKSPACE/ecr-token.txt"
-                            aws ecr get-login-password --region "${AWS_REGION}" > "$TOKEN_FILE"
-                            chmod 600 "$TOKEN_FILE"
+                        TOKEN_FILE="$WORKSPACE/ecr-deploy-token.txt"
+                        aws ecr get-login-password --region "${AWS_REGION}" > "$TOKEN_FILE"
+                        chmod 600 "$TOKEN_FILE"
 
-                            # Transfer token to Swarm Manager
-                            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                                "$TOKEN_FILE" "${MANAGER_USER}@${MANAGER_HOST}:/tmp/ecr-deploy-token.txt"
+                        scp $KEY_OPT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                            "$TOKEN_FILE" "${MANAGER_USER}@${MANAGER_HOST}:/tmp/ecr-deploy-token.txt"
 
-                            # Execute rolling deployment on Swarm Manager
-                            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                                "${MANAGER_USER}@${MANAGER_HOST}" \
-                                "
-                                    set -eu
-                                    cat /tmp/ecr-deploy-token.txt | \
-                                    docker login --username AWS --password-stdin '${ECR_REGISTRY}'
-                                    rm -f /tmp/ecr-deploy-token.txt
+                        ssh $KEY_OPT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                            "${MANAGER_USER}@${MANAGER_HOST}" \
+                            "
+                                set -e
+                                cat /tmp/ecr-deploy-token.txt | \
+                                sudo docker login --username AWS --password-stdin '${ECR_REGISTRY}'
+                                rm -f /tmp/ecr-deploy-token.txt
 
-                                    # Check if service exists; create via stack or update in place
-                                    if ! docker service inspect '${SERVICE_NAME}' >/dev/null 2>&1; then
-                                        echo 'Service not found. Initializing stack deployment...'
-                                        sed 's|IMAGE_PLACEHOLDER|${FULL_IMAGE_NAME}|g' docker-stack.yml > /tmp/deploy-stack.yml
-                                        docker stack deploy --with-registry-auth -c /tmp/deploy-stack.yml '${STACK_NAME}'
-                                    else
-                                        echo 'Updating existing service ${SERVICE_NAME} to ${FULL_IMAGE_NAME}...'
-                                        docker service update \
-                                            --with-registry-auth \
-                                            --image '${FULL_IMAGE_NAME}' \
-                                            --update-parallelism 1 \
-                                            --update-delay 10s \
-                                            --update-order start-first \
-                                            --update-failure-action rollback \
-                                            --detach=false \
-                                            '${SERVICE_NAME}'
-                                    fi
+                                if ! sudo docker service inspect '${SERVICE_NAME}' >/dev/null 2>&1; then
+                                    echo 'Service not found. Initializing stack deployment...'
+                                    sudo docker service create --name ${SERVICE_NAME} --replicas 3 -p 80:80 --with-registry-auth '${FULL_IMAGE_NAME}'
+                                else
+                                    echo 'Updating existing service ${SERVICE_NAME} to ${FULL_IMAGE_NAME}...'
+                                    sudo docker service update \
+                                        --with-registry-auth \
+                                        --image '${FULL_IMAGE_NAME}' \
+                                        --update-parallelism 1 \
+                                        --update-delay 10s \
+                                        --update-order start-first \
+                                        --update-failure-action rollback \
+                                        '${SERVICE_NAME}'
+                                fi
 
-                                    echo 'Deployment updated successfully.'
-                                "
-                        '''
-                    }
+                                echo 'Deployment updated successfully.'
+                            "
+                    '''
                 }
             }
         }
@@ -241,60 +230,63 @@ pipeline {
                 echo "No source code rebuild or new image creation performed."
                 echo "=========================================================="
                 withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: "${AWS_CREDENTIALS}"
-                    ]
+                    sshUserPrivateKey(
+                        credentialsId: "${SSH_CREDENTIALS}",
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
                 ]) {
-                    sshagent(["${SSH_CREDENTIALS}"]) {
-                        sh '''
-                            set -eu
+                    sh '''
+                        set -e
+                        KEY_OPT="-i $SSH_KEY"
+                        if [ -f "/var/jenkins_home/.ssh/id_rsa" ]; then
+                            KEY_OPT="-i /var/jenkins_home/.ssh/id_rsa"
+                        fi
 
-                            echo "Step 1: Confirming rollback image exists in Amazon ECR..."
-                            aws ecr describe-images \
-                                --region "${AWS_REGION}" \
-                                --repository-name "${ECR_REPO}" \
-                                --image-ids imageTag="${IMAGE_TAG}" \
-                                >/dev/null
+                        echo "Step 1: Confirming rollback image exists in Amazon ECR..."
+                        aws ecr describe-images \
+                            --region "${AWS_REGION}" \
+                            --repository-name "${ECR_REPO}" \
+                            --image-ids imageTag="${IMAGE_TAG}" \
+                            --query 'imageDetails[0].[imageTags,imageDigest,imagePushedAt]' \
+                            --output table
 
-                            echo "Confirmed: ${FULL_IMAGE_NAME} is available in ECR."
+                        echo "[ROLLBACK] Deploying pre-built immutable image directly from ECR (No Rebuild)"
 
-                            TOKEN_FILE="${WORKSPACE}/ecr-rollback-token.txt"
-                            REMOTE_TOKEN="/tmp/ecr-rollback-token.txt"
+                        TOKEN_FILE="${WORKSPACE}/ecr-rollback-token.txt"
+                        REMOTE_TOKEN="/tmp/ecr-rollback-token.txt"
 
-                            aws ecr get-login-password --region "${AWS_REGION}" > "${TOKEN_FILE}"
-                            chmod 600 "${TOKEN_FILE}"
+                        aws ecr get-login-password --region "${AWS_REGION}" > "${TOKEN_FILE}"
+                        chmod 600 "${TOKEN_FILE}"
 
-                            scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                                "${TOKEN_FILE}" "${MANAGER_USER}@${MANAGER_HOST}:${REMOTE_TOKEN}"
+                        scp $KEY_OPT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                            "${TOKEN_FILE}" "${MANAGER_USER}@${MANAGER_HOST}:${REMOTE_TOKEN}"
 
-                            echo "Step 2: Redeploying prior image on Docker Swarm via Rolling Update..."
-                            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                                "${MANAGER_USER}@${MANAGER_HOST}" \
-                                "
-                                    set -eu
-                                    cat '${REMOTE_TOKEN}' | docker login --username AWS --password-stdin '${ECR_REGISTRY}'
-                                    rm -f '${REMOTE_TOKEN}'
+                        echo "Step 2: Redeploying prior image on Docker Swarm via Rolling Update..."
+                        ssh $KEY_OPT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                            "${MANAGER_USER}@${MANAGER_HOST}" \
+                            "
+                                set -e
+                                cat '${REMOTE_TOKEN}' | sudo docker login --username AWS --password-stdin '${ECR_REGISTRY}'
+                                rm -f '${REMOTE_TOKEN}'
 
-                                    echo 'Current active image on service:'
-                                    docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' '${SERVICE_NAME}'
+                                echo 'Current active image on service:'
+                                sudo docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' '${SERVICE_NAME}'
 
-                                    echo 'Triggering rolling rollback to ${FULL_IMAGE_NAME}...'
-                                    docker service update \
-                                        --with-registry-auth \
-                                        --image '${FULL_IMAGE_NAME}' \
-                                        --update-parallelism 1 \
-                                        --update-delay 10s \
-                                        --update-order stop-first \
-                                        --update-failure-action rollback \
-                                        --detach=false \
-                                        '${SERVICE_NAME}'
+                                echo 'Triggering rolling rollback to ${FULL_IMAGE_NAME}...'
+                                sudo docker service update \
+                                    --with-registry-auth \
+                                    --image '${FULL_IMAGE_NAME}' \
+                                    --update-parallelism 1 \
+                                    --update-delay 10s \
+                                    --update-order stop-first \
+                                    --update-failure-action rollback \
+                                    '${SERVICE_NAME}'
 
-                                    echo '--- Rollback Verified ---'
-                                    docker service inspect --format 'Active Image: {{.Spec.TaskTemplate.ContainerSpec.Image}}' '${SERVICE_NAME}'
-                                "
-                        '''
-                    }
+                                echo '--- Rollback Verified ---'
+                                sudo docker service inspect --format 'Active Image: {{.Spec.TaskTemplate.ContainerSpec.Image}}' '${SERVICE_NAME}'
+                            "
+                    '''
                 }
             }
         }
@@ -306,19 +298,29 @@ pipeline {
                 }
             }
             steps {
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: "${SSH_CREDENTIALS}",
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
                     sh '''
-                        set -eu
-                        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                        set -e
+                        KEY_OPT="-i $SSH_KEY"
+                        if [ -f "/var/jenkins_home/.ssh/id_rsa" ]; then
+                            KEY_OPT="-i /var/jenkins_home/.ssh/id_rsa"
+                        fi
+                        ssh $KEY_OPT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                             "${MANAGER_USER}@${MANAGER_HOST}" \
                             "
                                 echo '======================================'
                                 echo 'Service Status:'
-                                docker service ls --filter name='${SERVICE_NAME}'
+                                sudo docker service ls --filter name='${SERVICE_NAME}'
 
                                 echo '======================================'
                                 echo 'Task Replica Placement:'
-                                docker service ps '${SERVICE_NAME}'
+                                sudo docker service ps '${SERVICE_NAME}'
                                 echo '======================================'
                             "
                     '''
@@ -345,12 +347,6 @@ pipeline {
         }
         always {
             sh 'rm -f "$WORKSPACE"/ecr*.txt || true'
-            cleanWs(
-                cleanWhenNotBuilt: false,
-                deleteDirs: true,
-                disableDeferredWipeout: false,
-                notFailBuild: true
-            )
         }
     }
 }
