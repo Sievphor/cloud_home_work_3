@@ -43,7 +43,7 @@ pipeline {
         ECR_IMAGE       = "${ECR_REGISTRY}/${ECR_REPO}"
 
         // Swarm Manager EC2 Configuration
-        MANAGER_HOST    = '13.220.98.249'
+        MANAGER_HOST    = '3.91.30.20'
         MANAGER_USER    = 'ubuntu'
         STACK_NAME      = 'homework3'
         SERVICE_NAME    = 'homework3_web'
@@ -142,7 +142,7 @@ pipeline {
                     docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
                     # Push the versioned tag to ECR
-                    docker push "${FULL_IMAGE_NAME}"
+                    docker push "${FULL_IMAGE_NAME}" || true
 
                     # Verify image existence in ECR
                     aws ecr describe-images \
